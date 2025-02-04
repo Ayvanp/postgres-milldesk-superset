@@ -1,20 +1,15 @@
-# Ignorar el entorno virtual
 venv/
 
-# Archivos de configuración sensibles
 .env
-config.py
 
-# Archivos de caché y compilación
 __pycache__/
 *.pyc
 *.pyo
 
-# Archivos de logs
+run_all_etl.sh
 etl_process.log
 etl_test_run.log
 logs/
 
-# Archivos de sistema (VS Code, Mac, etc.)
 .vscode/
 .DS_Store
