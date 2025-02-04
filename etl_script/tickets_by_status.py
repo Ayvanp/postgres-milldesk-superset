@@ -1,7 +1,5 @@
 # etl_script/tickets_by_status.py
-
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from sqlalchemy import text
 
 # Módulos propios
@@ -17,58 +15,29 @@ def main():
 
     engine = get_engine()
 
-    # 1) Definir estatus
-    statuses = ['Pendiente', 'Abierto', 'Asignado', 'Listo para cierre']
+    # 1) Extracción: Llamar al endpoint sin filtrar por estado (se obtiene toda la info)
+    logger.info("Iniciando extracción de tickets (todos los estados)...")
+    # Al pasar una cadena vacía, se genera la URL:
+    data = get_tickets_by_status("")
+    logger.info("Extracción completada. Transformando datos...")
 
-    # 2) Definir las tareas (una por cada status)
-    tasks = [
-        {
-            "label": f"tickets_by_status_{st}",
-            "extract_fn": get_tickets_by_status,
-            "extract_kwargs": {"status": st},
-            "transform_fn": transform_tickets,
-            "target_table": "tickets"
-        }
-        for st in statuses
-    ]
+    # 2) Transformación
+    df = transform_tickets(data)
+    logger.info(f"Transformación completada. Total de filas obtenidas: {len(df)}")
 
-    # 3) Truncar la tabla 'tickets' (y las que dependan de ella, si procede)
+    # 3) Truncar la tabla 'tickets'
     with engine.begin() as conn:
         logger.info("🧹 Truncando tabla: tickets...")
         conn.execute(text("TRUNCATE TABLE tickets;"))
 
-    # 4) fetch_transform
-    def fetch_transform(task):
-        label = task["label"]
-        logger.info(f"[{label}] Iniciando extracción...")
-        data = task["extract_fn"](**task["extract_kwargs"])
-        logger.info(f"[{label}] Extracción completa. Transformando datos...")
+    # 4) Cargar datos
+    if df.empty:
+        logger.warning("DataFrame vacío. Se omite carga en 'tickets'.")
+    else:
+        load_data(df, "tickets", engine)
+        logger.info("Carga completada en la tabla 'tickets'.")
 
-        df = task["transform_fn"](data)
-        logger.info(f"[{label}] Transformación completa. Filas obtenidas: {len(df)}")
-        return (task["target_table"], df, label)
-
-    # 5) Ejecutar en paralelo
-    results = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        future_to_label = {executor.submit(fetch_transform, t): t["label"] for t in tasks}
-        for future in as_completed(future_to_label):
-            label = future_to_label[future]
-            try:
-                table_name, df, lbl = future.result()
-                results.append((table_name, df, lbl))
-            except Exception as e:
-                logger.error(f"[label={label}] Error en fetch_transform: {e}")
-
-    # 6) Cargar
-    for table_name, df, label in results:
-        if df.empty:
-            logger.warning(f"[{label}] DataFrame vacío. Se omite carga.")
-            continue
-        load_data(df, table_name, engine)
-        logger.info(f"[{label}] Carga completada en '{table_name}'.")
-
-    # 7) Generar tabla SLA (igual que en tu main)
+    # 5) Generar la tabla SLA (proceso sin cambios respecto a la versión anterior)
     try:
         logger.info("⏳ Generando la tabla 'tickets_sla_detalle' con los cálculos SLA...")
         with engine.begin() as conn:
@@ -94,7 +63,6 @@ def main():
                     t.requester,
                     t.status,
                     t.slasexpirationdate,
-
                     CASE
                        WHEN t.slasexpirationdate = 'SLA expirado' THEN 'SLA expirado (manual)'
                        WHEN t.slasexpirationdate ~ '^\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}$' THEN
@@ -105,13 +73,11 @@ def main():
                          END
                        ELSE 'SIN FECHA VÁLIDA'
                     END AS estado_sla,
-
                     CASE
                        WHEN t.slasexpirationdate ~ '^\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}$'
                        THEN date_trunc('second', to_timestamp(t.slasexpirationdate, 'DD/MM/YYYY HH24:MI') - NOW())
                        ELSE NULL
                     END AS tiempo_restante_intervalo,
-
                     EXTRACT(DAY FROM (
                       CASE 
                          WHEN t.slasexpirationdate ~ '^\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}$'
@@ -119,7 +85,6 @@ def main():
                          ELSE INTERVAL '0'
                       END
                     )) AS dias_restantes,
-
                     EXTRACT(HOUR FROM (
                       CASE 
                          WHEN t.slasexpirationdate ~ '^\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}$'
@@ -127,7 +92,6 @@ def main():
                          ELSE INTERVAL '0'
                       END
                     )) AS horas_restantes,
-
                     EXTRACT(MINUTE FROM (
                       CASE 
                          WHEN t.slasexpirationdate ~ '^\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}$'
@@ -135,19 +99,16 @@ def main():
                          ELSE INTERVAL '0'
                       END
                     )) AS minutos_restantes,
-
                     CASE 
                        WHEN t.slasexpirationdate ~ '^\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}$'
                        THEN (EXTRACT(SECOND FROM (to_timestamp(t.slasexpirationdate, 'DD/MM/YYYY HH24:MI') - NOW())))::int
                        ELSE 0
                     END AS segundos_restantes
-
                 FROM public.tickets t
                 WHERE t.slasexpirationdate IS NOT NULL
                 ORDER BY t.id DESC;
             """
             conn.execute(text(insert_query))
-
         logger.info("✅ Tabla 'tickets_sla_detalle' generada con éxito.")
     except Exception as e:
         logger.error(f"❌ Error al generar la tabla 'tickets_sla_detalle': {e}")
@@ -156,3 +117,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
